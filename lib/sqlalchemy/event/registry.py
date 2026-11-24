@@ -123,10 +123,13 @@ def _stored_in_collection(
 ) -> bool:
     key = event_key._key
 
-    dispatch_reg = _key_to_collection[key]
-
+    # create the weakrefs before looking up the key's dict; the allocation
+    # can run a GC pass that detaches a dict already fetched from
+    # _key_to_collection (see #13805)
     owner_ref = owner.ref
     listen_ref = weakref.ref(event_key._listen_fn)
+
+    dispatch_reg = _key_to_collection[key]
 
     if owner_ref in dispatch_reg:
         return False

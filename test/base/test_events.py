@@ -1672,6 +1672,101 @@ class RemovalTest(TearDownLocalEventsFixture, fixtures.TestBase):
         assert key in registry._key_to_collection
         assert collection_ref in registry._collection_to_key
 
+    @testing.requires.predictable_gc
+    def test_stored_in_collection_gc_atomicity(self):
+        """test for [ticket:13805]
+
+        A GC pass triggered by the ``weakref.ref`` allocation inside
+        ``_stored_in_collection`` can empty ``_key_to_collection`` for the
+        key being stored.  The owner must then be recorded in the dict that
+        is live in the registry, not the detached one fetched beforehand;
+        otherwise a later ``_collection_gced`` for that owner raises
+        ``KeyError``.
+
+        """
+
+        import gc
+        import sys
+        import types
+        import weakref
+
+        from sqlalchemy.event import attr
+        from sqlalchemy.event import registry
+
+        class Collection(attr.RefCollection):
+            __slots__ = ("__weakref__",)
+
+        class FakeEventKey:
+            def __init__(self, key, listen_fn):
+                self._key = key
+                self._listen_fn = listen_fn
+
+        def listen_one(x, y):
+            pass
+
+        def listen_two(x, y):
+            pass
+
+        def listen_three(x, y):
+            pass
+
+        key = (id(listen_one), "event_one", id(listen_one))
+
+        coll1 = Collection()
+        registry._stored_in_collection(FakeEventKey(key, listen_one), coll1)
+
+        # leave coll1 unreachable inside cyclic garbage, awaiting collection
+        box = [coll1]
+        box.append(box)
+        del coll1
+        del box
+
+        real_weakref = registry.weakref
+        real_ref = weakref.ref
+
+        def ref_that_collects(*args, **kw):
+            gc.collect()
+            return real_ref(*args, **kw)
+
+        was_enabled = gc.isenabled()
+        gc.disable()
+        registry.weakref = types.SimpleNamespace(ref=ref_that_collects)
+        try:
+            coll2 = Collection()
+            registry._stored_in_collection(
+                FakeEventKey(key, listen_two), coll2
+            )
+        finally:
+            registry.weakref = real_weakref
+            if was_enabled:
+                gc.enable()
+
+        # coll1's collection was gced mid-store; coll2 must have been
+        # recorded in the registry dict that stayed live
+        eq_(
+            list(registry._key_to_collection.get(key, ())),
+            [coll2.ref],
+        )
+
+        # the collection->key entry coll2 left behind must not raise
+        # KeyError when the key is recreated and coll2 is then collected
+        coll3 = Collection()
+        registry._stored_in_collection(FakeEventKey(key, listen_three), coll3)
+
+        errors = []
+        old_hook = sys.unraisablehook
+        sys.unraisablehook = lambda u: errors.append(u.exc_value)
+        try:
+            del coll2
+            gc_collect()
+        finally:
+            sys.unraisablehook = old_hook
+
+        eq_(errors, [])
+
+        del coll3
+        gc_collect()
+
     def test_remove_not_listened(self):
         Target = self._fixture()
 
