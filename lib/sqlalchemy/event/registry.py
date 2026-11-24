@@ -123,10 +123,10 @@ def _stored_in_collection(
 ) -> bool:
     key = event_key._key
 
-    dispatch_reg = _key_to_collection[key]
-
     owner_ref = owner.ref
     listen_ref = weakref.ref(event_key._listen_fn)
+
+    dispatch_reg = _key_to_collection[key]
 
     if owner_ref in dispatch_reg:
         return False

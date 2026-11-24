@@ -1672,6 +1672,58 @@ class RemovalTest(TearDownLocalEventsFixture, fixtures.TestBase):
         assert key in registry._key_to_collection
         assert collection_ref in registry._collection_to_key
 
+    @testing.requires.predictable_gc
+    def test_collection_gced_during_store(self):
+        """test related to #13805"""
+
+        import gc
+        import sqlite3
+        import sys
+        import types
+        import weakref
+
+        from sqlalchemy.event import registry
+        from sqlalchemy.pool import QueuePool
+
+        errors = []
+        old_hook = sys.unraisablehook
+        sys.unraisablehook = lambda u: errors.append(u.exc_value)
+
+        def on_connect(dbapi_connection, record):
+            pass
+
+        real_ref = weakref.ref
+
+        def ref_that_collects(*args, **kwargs):
+            gc.collect()
+            return real_ref(*args, **kwargs)
+
+        gc_was_enabled = gc.isenabled()
+        try:
+            registry.weakref = types.SimpleNamespace(ref=ref_that_collects)
+            gc.disable()
+
+            def one_round():
+                pool = QueuePool(lambda: sqlite3.connect(":memory:"))
+                event.listen(pool, "connect", on_connect)
+                heir = pool.recreate()
+                heir.cycle = heir
+                heir2 = heir.recreate()
+                heir2.cycle = heir2
+
+            for _ in range(100):
+                one_round()
+                if errors:
+                    break
+        finally:
+            registry.weakref = weakref
+            sys.unraisablehook = old_hook
+            if gc_was_enabled:
+                gc.enable()
+            gc_collect()
+
+        eq_(errors, [])
+
     def test_remove_not_listened(self):
         Target = self._fixture()
 
